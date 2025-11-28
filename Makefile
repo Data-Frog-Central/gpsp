@@ -215,6 +215,7 @@ else ifneq (,$(filter $(platform), ngc wii wiiu))
 	CXX = $(DEVKITPPC)/bin/powerpc-eabi-g++$(EXE_EXT)
 	AR = $(DEVKITPPC)/bin/powerpc-eabi-ar$(EXE_EXT)
 	CFLAGS += -DGEKKO -mcpu=750 -meabi -mhard-float -DHAVE_STRTOF_L
+        CFLAGS += -ffunction-sections -fdata-sections -D__wiiu__ -D__wut__
 	STATIC_LINKING = 1
 
 # PSP
@@ -329,6 +330,7 @@ else ifeq ($(platform), classic_armv7_a7)
 	    LDFLAGS += -static-libgcc -static-libstdc++
 	  endif
 	endif
+
 #######################################
 
 # Xbox 360
@@ -481,15 +483,16 @@ else ifeq ($(platform), rs90)
 
 # SF2000
 else ifeq ($(platform), sf2000)
-	TARGET := $(TARGET_NAME)_libretro_$(platform).a
+	TARGET := _libretro_$(platform).a
 	MIPS:=/opt/mips32-mti-elf/2019.09-03-2/bin/mips-mti-elf-
 	CC = $(MIPS)gcc
 	CXX = $(MIPS)g++
 	AR = $(MIPS)ar
 	CFLAGS = -EL -march=mips32 -mtune=mips32 -msoft-float -G0 -mno-abicalls -fno-pic
-	CFLAGS += -ffast-math -fomit-frame-pointer -ffunction-sections -fdata-sections 
+	CFLAGS += -ffast-math -fomit-frame-pointer -ffunction-sections -fdata-sections
 	CFLAGS += -DROM_BUFFER_SIZE=16
 	CFLAGS += -DSF2000
+	CFLAGS += $(EXTRA_CFLAGS)
 	CXXFLAGS = $(CFLAGS)
 	STATIC_LINKING = 1
 	HAVE_DYNAREC := 1
@@ -507,6 +510,32 @@ else ifeq ($(platform), miyoo)
 	CFLAGS += -DSMALL_TRANSLATION_CACHE
 	HAVE_DYNAREC := 1
 	CPU_ARCH := arm
+	
+
+else ifeq ($(platform), miyoomini)
+	TARGET := $(TARGET_NAME)_plus_libretro.so
+	CC = /opt/miyoomini-toolchain/usr/bin/arm-linux-gcc
+	CXX = /opt/miyoomini-toolchain/usr/bin/arm-linux-g++
+	AR = /opt/miyoomini-toolchain/usr/bin/arm-linux-ar
+	fpic := -fPIC
+	SHARED := -shared -Wl,--version-script=link.T -Wl,--no-undefined
+	CFLAGS += -Ofast \
+	-flto=4 -fwhole-program -fuse-linker-plugin \
+	-fdata-sections -ffunction-sections -Wl,--gc-sections \
+	-fno-stack-protector -fno-ident -fomit-frame-pointer \
+	-falign-functions=1 -falign-jumps=1 -falign-loops=1 \
+	-fno-unwind-tables -fno-asynchronous-unwind-tables -fno-unroll-loops \
+	-fmerge-all-constants -fno-math-errno \
+	-marm -mtune=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard
+	CXXFLAGS = $(CFLAGS) -std=gnu++11
+	CPPFLAGS += $(CFLAGS)
+	ASFLAGS += $(CFLAGS)
+	CPU_ARCH := arm
+	MMAP_JIT_CACHE = 1
+	HAVE_DYNAREC = 1
+	HAVE_NEON = 1
+	ARCH = arm
+	BUILTIN_GPU = neon
 
 # Windows
 else
@@ -564,6 +593,10 @@ CFLAGS += $(DEFINES) $(COMMON_DEFINES)
 
 ifeq ($(FRONTEND_SUPPORTS_RGB565), 1)
 	CFLAGS += -DFRONTEND_SUPPORTS_RGB565
+endif
+
+ifeq ($(SF2000), 1)
+	CFLAGS += -DSF2000
 endif
 
 

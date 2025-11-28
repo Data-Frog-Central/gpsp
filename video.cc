@@ -24,6 +24,30 @@ extern "C" {
 
 u16* gba_screen_pixels = NULL;
 
+#ifdef SF2000_DISABLED_VCOUNT_CACHE
+// DISABLED: VCOUNT cache causes visual glitches
+static u32 g_cached_vcount = 0;
+static u32 g_vcount_frame_id = 0xFFFFFFFF;
+
+static inline u32 get_cached_vcount() {
+  return g_cached_vcount;
+}
+
+static inline void update_vcount_cache(u32 vcount) {
+  g_cached_vcount = vcount;
+  g_vcount_frame_id = vcount; // Use vcount as simple frame identifier
+}
+#else
+// Always read directly from register when cache is disabled
+static inline u32 get_cached_vcount() {
+  return read_ioreg(REG_VCOUNT);
+}
+
+static inline void update_vcount_cache(u32 vcount) {
+  // No-op when cache disabled
+}
+#endif
+
 #define get_screen_pixels()   gba_screen_pixels
 #define get_screen_pitch()    GBA_SCREEN_PITCH
 
@@ -157,7 +181,11 @@ static inline void rend_part_tile_Nbpp(u32 bg_comb, u32 px_comb,
 ) {
   // Seek to the specified tile, using the tile number and size.
   // tile_base already points to the right tile-line vertical offset
+#ifdef SF2000
+  const u8 *tile_ptr = &tile_base[(tile & 0x3FF) << (is8bpp ? 6 : 5)];  // *64 = <<6, *32 = <<5
+#else
   const u8 *tile_ptr = &tile_base[(tile & 0x3FF) * (is8bpp ? 64 : 32)];
+#endif
   u16 bgcolor = paltbl[0];
 
   // On vertical flip, apply the mirror offset
@@ -194,8 +222,13 @@ static inline void rend_part_tile_Nbpp(u32 bg_comb, u32 px_comb,
     const u16 *subpal = &paltbl[tilepal];
     // Read packed pixel data, skip start pixels
     u32 tilepix = eswap32(*(u32*)tile_ptr);
+#ifdef SF2000
+    if (hflip) tilepix <<= (start << 2);  // *4 becomes <<2
+    else       tilepix >>= (start << 2);  // *4 becomes <<2
+#else
     if (hflip) tilepix <<= (start * 4);
     else       tilepix >>= (start * 4);
+#endif
     // Only 32 bits (8 pixels * 4 bits)
     for (u32 i = start; i < end; i++, dest_ptr++) {
       u8 pval = hflip ? tilepix >> 28 : tilepix & 0xF;
@@ -226,60 +259,76 @@ static inline void render_tile_Nbpp(
   u32 bg_comb, u32 px_comb, dtype *dest_ptr, u16 tile,
   const u8 *tile_base, int vertical_pixel_flip, const u16 *paltbl
 ) {
+#ifdef SF2000
+  const u8 *tile_ptr = &tile_base[(tile & 0x3FF) << (is8bpp ? 6 : 5)];  // *64 = <<6, *32 = <<5
+#else
   const u8 *tile_ptr = &tile_base[(tile & 0x3FF) * (is8bpp ? 64 : 32)];
+#endif
   u16 bgcolor = paltbl[0];
 
   if (tile & 0x800)
     tile_ptr += vertical_pixel_flip;
 
   if (is8bpp) {
-    for (u32 j = 0; j < 2; j++) {
-      u32 tilepix = eswap32(((u32*)tile_ptr)[hflip ? 1-j : j]);
-      if (tilepix) {
-        for (u32 i = 0; i < 4; i++, dest_ptr++) {
-          u8 pval = hflip ? (tilepix >> (24 - i*8)) : (tilepix >> (i*8));
-          if (pval) {
-            if (rdtype == FULLCOLOR)
-              *dest_ptr = paltbl[pval];
-            else if (rdtype == INDXCOLOR)
-              *dest_ptr = pval | px_comb;  // Add combine flags
-            else if (rdtype == STCKCOLOR)
-              *dest_ptr = pval | px_comb | ((isbase ? bg_comb : *dest_ptr) << 16);
-          }
-          else if (isbase) {
-            *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
-          }
-        }
-      } else {
-        for (u32 i = 0; i < 4; i++, dest_ptr++)
-          if (isbase)
-            *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
+    // Process 8bpp pixels byte by byte
+    for (u32 i = 0; i < 8; i++, dest_ptr++) {
+      u8 pval = tile_ptr[hflip ? (7 - i) : i];
+      if (pval) {
+        if (rdtype == FULLCOLOR)
+          *dest_ptr = paltbl[pval];
+        else if (rdtype == INDXCOLOR)
+          *dest_ptr = pval | px_comb;  // Add combine flags
+        else if (rdtype == STCKCOLOR)
+          *dest_ptr = pval | px_comb | ((isbase ? bg_comb : *dest_ptr) << 16);
+      }
+      else if (isbase) {
+        *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
       }
     }
   } else {
+    // SF2000 PERFORMANCE: Optimize 4bpp tile rendering
     u32 tilepix = eswap32(*(u32*)tile_ptr);
     if (tilepix) {  // We can skip it all if the row is transparent
       u16 tilepal = (tile >> 12) << 4;
       u16 pxflg = px_comb | tilepal;
       const u16 *subpal = &paltbl[tilepal];
-      for (u32 i = 0; i < 8; i++, dest_ptr++) {
-        u8 pval = (hflip ? (tilepix >> ((7-i)*4)) : (tilepix >> (i*4))) & 0xF;
-        if (pval) {
-          if (rdtype == FULLCOLOR)
+      
+      // Optimized pixel processing with reduced function call overhead
+      if (rdtype == FULLCOLOR && !hflip) {
+        // Fast path for most common case: full color, no horizontal flip
+        for (u32 i = 0; i < 8; i++, dest_ptr++) {
+          u8 pval = (tilepix >> (i*4)) & 0xF;
+          if (pval) {
             *dest_ptr = subpal[pval];
-          else if (rdtype == INDXCOLOR)
-            *dest_ptr = pxflg | pval;
-          else if (rdtype == STCKCOLOR)
-            *dest_ptr = pxflg | pval | ((isbase ? bg_comb : *dest_ptr) << 16);
+          }
+          else if (isbase) {
+            *dest_ptr = bgcolor;
+          }
         }
-        else if (isbase) {
-          *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
+      } else {
+        // Standard path for other cases
+        for (u32 i = 0; i < 8; i++, dest_ptr++) {
+          u8 pval = (hflip ? (tilepix >> ((7-i)*4)) : (tilepix >> (i*4))) & 0xF;
+          if (pval) {
+            if (rdtype == FULLCOLOR)
+              *dest_ptr = subpal[pval];
+            else if (rdtype == INDXCOLOR)
+              *dest_ptr = pxflg | pval;
+            else if (rdtype == STCKCOLOR)
+              *dest_ptr = pxflg | pval | ((isbase ? bg_comb : *dest_ptr) << 16);
+          }
+          else if (isbase) {
+            *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
+          }
         }
       }
-    } else if (isbase) {
-      // In this case we simply fill the pixels with background pixels
-      for (u32 i = 0; i < 8; i++, dest_ptr++)
-        *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
+    } else {
+      // Row is transparent, fast fill with background for base layer only
+      for (u32 i = 0; i < 8; i++, dest_ptr++) {
+        if (isbase) {
+          *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : (0 | bg_comb);
+        }
+      }
     }
   }
 }
@@ -293,8 +342,16 @@ static void render_scanline_text_fast(u32 layer,
   u16 vcount = read_ioreg(REG_VCOUNT);
   u32 map_size = (bg_control >> 14) & 0x03;
   u32 map_width = map_widths[map_size];
+#ifdef SF2000
+  // SF2000: Cache register reads and use bit masks
+  u32 bg_hofs = read_ioreg(REG_BGxHOFS(layer));
+  u32 bg_vofs = read_ioreg(REG_BGxVOFS(layer));
+  u32 hoffset = (start + bg_hofs) & 511;
+  u32 voffset = (vcount + bg_vofs) & 511;
+#else
   u32 hoffset = (start + read_ioreg(REG_BGxHOFS(layer))) % 512;
   u32 voffset = (vcount + read_ioreg(REG_BGxVOFS(layer))) % 512;
+#endif
   stype *dest_ptr = ((stype*)scanline) + start;
 
   // Calculate combine masks. These store 2 bits of info: 1st and 2nd target.
@@ -304,17 +361,41 @@ static void render_scanline_text_fast(u32 layer,
   // Background map data is in vram, at an offset specified in 2K blocks.
   // (each map data block is 32x32 tiles, at 16bpp, so 2KB)
   u32 base_block = (bg_control >> 8) & 0x1F;
+#ifdef SF2000
+  u16 *map_base = (u16 *)&vram[base_block << 11];  // *2048 becomes <<11
+#else
+#ifdef SF2000
+  u16 *map_base = (u16 *)&vram[base_block << 11];  // *2048 becomes <<11
+#else
   u16 *map_base = (u16 *)&vram[base_block * 2048];
+#endif
+#endif
   u16 *map_ptr, *second_ptr;
 
   end -= start;
 
   // Skip the top one/two block(s) if using the bottom half
   if ((map_size & 0x02) && (voffset >= 256))
+#ifdef SF2000
+    map_base += ((map_width >> 3) << 5);  // /8 * 32 = >>3 <<5
+#else
+#ifdef SF2000
+    map_base += ((map_width >> 3) << 5);  // /8 * 32 = >>3 <<5
+#else
     map_base += ((map_width / 8) * 32);
+#endif
+#endif
 
   // Skip the top tiles within the block
+#ifdef SF2000
+  map_base += (((voffset & 255) >> 3) << 5);  // %256 /8 * 32 = &255 >>3 <<5
+#else
+#ifdef SF2000
+  map_base += (((voffset & 255) >> 3) << 5);  // %256 /8 * 32 = &255 >>3 <<5
+#else
   map_base += (((voffset % 256) / 8) * 32);
+#endif
+#endif
 
   // we might need to render from two charblocks, store a second pointer.
   second_ptr = map_ptr = map_base;
@@ -323,21 +404,45 @@ static void render_scanline_text_fast(u32 layer,
     if(hoffset >= 256) {
       // If we are rendering the right block, skip a whole charblock
       hoffset -= 256;
+#ifdef SF2000
+      map_ptr += 1024;  // 32*32 = 1024 (constant)
+#else
+#ifdef SF2000
+      map_ptr += 1024;  // 32*32 = 1024 (constant)
+#else
       map_ptr += (32 * 32);
+#endif
+#endif
     } else {
       // If we are rendering the left block, we might overrun into the right
+#ifdef SF2000
+      second_ptr += 1024;  // 32*32 = 1024 (constant)
+#else
+#ifdef SF2000
+      second_ptr += 1024;  // 32*32 = 1024 (constant)
+#else
       second_ptr += (32 * 32);
+#endif
+#endif
     }
   } else {
     hoffset %= 256;     // Background is 256 pixels wide
   }
 
   // Skip the left blocks within the block
+#ifdef SF2000
+  map_ptr += hoffset >> 3;  // /8 becomes >>3
+#else
   map_ptr += hoffset / 8;
+#endif
 
   // Render a single scanline of text tiles
   u32 tilewidth = is8bpp ? tile_width_8bpp : tile_width_4bpp;
+#ifdef SF2000
+  u32 vert_pix_offset = (voffset & 7) * tilewidth;  // %8 becomes &7
+#else
   u32 vert_pix_offset = (voffset % 8) * tilewidth;
+#endif
   // Calculate the pixel offset between a line and its "flipped" mirror.
   // The values can be {56, 40, 24, 8, -8, -24, -40, -56}
   s32 vflip_off = is8bpp ?
@@ -347,11 +452,23 @@ static void render_scanline_text_fast(u32 layer,
   // The tilemap base is selected via bgcnt (16KiB chunks)
   u32 tilecntrl = (bg_control >> 2) & 0x03;
   // Account for the base offset plus the tile vertical offset
+#ifdef SF2000
+  u8 *tile_base = &vram[(tilecntrl << 14) + vert_pix_offset];  // *16*1024 becomes <<14
+#else
+#ifdef SF2000
+  u8 *tile_base = &vram[(tilecntrl << 14) + vert_pix_offset];  // *16*1024 becomes <<14
+#else
   u8 *tile_base = &vram[tilecntrl * 16*1024 + vert_pix_offset];
+#endif
+#endif
   // Number of pixels available until the end of the tile block
   u32 pixel_run = 256 - hoffset;
 
+#ifdef SF2000
+  u32 tile_hoff = hoffset & 7;  // %8 becomes &7
+#else
   u32 tile_hoff = hoffset % 8;
+#endif
   u32 partial_hcnt = 8 - tile_hoff;
 
   if (tile_hoff) {
@@ -376,7 +493,11 @@ static void render_scanline_text_fast(u32 layer,
     return;
 
   // Now render full tiles
+#ifdef SF2000
+  u32 todraw = MIN(end, pixel_run) >> 3;  // /8 becomes >>3
+#else
   u32 todraw = MIN(end, pixel_run) / 8;
+#endif
 
   for (u32 i = 0; i < todraw; i++, dest_ptr += 8) {
     u16 tile = eswap16(*map_ptr++);
@@ -388,8 +509,13 @@ static void render_scanline_text_fast(u32 layer,
         bg_comb, px_comb, dest_ptr, tile, tile_base, vflip_off, paltbl);
   }
 
+#ifdef SF2000
+  end -= todraw << 3;        // *8 becomes <<3
+  pixel_run -= todraw << 3;  // *8 becomes <<3
+#else
   end -= todraw * 8;
   pixel_run -= todraw * 8;
+#endif
 
   if (!end)
     return;
@@ -398,7 +524,11 @@ static void render_scanline_text_fast(u32 layer,
   if (!pixel_run)
     map_ptr = second_ptr;
 
+#ifdef SF2000
+  todraw = end >> 3;  // /8 becomes >>3
+#else
   todraw = end / 8;
+#endif
   for (u32 i = 0; i < todraw; i++, dest_ptr += 8) {
     u16 tile = eswap16(*map_ptr++);
     if (tile & 0x400)   // Tile horizontal flip
@@ -428,6 +558,20 @@ template<typename stype, rendtype rdtype, bool isbase, bool is8bpp>
 static void render_scanline_text_mosaic(u32 layer,
  u32 start, u32 end, void *scanline, const u16 * paltbl)
 {
+#ifdef SF2000
+  u32 bg_control = read_ioreg(REG_BGxCNT(layer));
+  u32 mosaic_reg = read_ioreg(REG_MOSAIC);
+  const u32 mosh = (mosaic_reg & 0xF) + 1;
+  const u32 mosv = ((mosaic_reg >> 4) & 0xF) + 1;
+  u16 vcount = read_ioreg(REG_VCOUNT);
+  u32 map_size = (bg_control >> 14) & 0x03;
+  u32 map_width = map_widths[map_size];
+  u32 bg_hofs = read_ioreg(REG_BGxHOFS(layer));
+  u32 bg_vofs = read_ioreg(REG_BGxVOFS(layer));
+  u32 hoffset = (start + bg_hofs) & 511;
+  u16 vmosoff = vcount - (vcount & (mosv - 1));
+  u32 voffset = (vmosoff + bg_vofs) & 511;
+#else
   u32 bg_control = read_ioreg(REG_BGxCNT(layer));
   const u32 mosh = (read_ioreg(REG_MOSAIC) & 0xF) + 1;
   const u32 mosv = ((read_ioreg(REG_MOSAIC) >> 4) & 0xF) + 1;
@@ -437,18 +581,35 @@ static void render_scanline_text_mosaic(u32 layer,
   u32 hoffset = (start + read_ioreg(REG_BGxHOFS(layer))) % 512;
   u16 vmosoff = vcount - vcount % mosv;
   u32 voffset = (vmosoff + read_ioreg(REG_BGxVOFS(layer))) % 512;
+#endif
   stype *dest_ptr = ((stype*)scanline) + start;
 
   u32 bg_comb = color_flags(5), px_comb = color_flags(layer);
 
   u32 base_block = (bg_control >> 8) & 0x1F;
+#ifdef SF2000
+  u16 *map_base = (u16 *)&vram[base_block << 11];  // *2048 becomes <<11
+#else
+#ifdef SF2000
+  u16 *map_base = (u16 *)&vram[base_block << 11];  // *2048 becomes <<11
+#else
   u16 *map_base = (u16 *)&vram[base_block * 2048];
+#endif
+#endif
   u16 *map_ptr, *second_ptr;
 
   if ((map_size & 0x02) && (voffset >= 256))
+#ifdef SF2000
+    map_base += ((map_width >> 3) << 5);  // /8 * 32 = >>3 <<5
+#else
     map_base += ((map_width / 8) * 32);
+#endif
 
+#ifdef SF2000
+  map_base += (((voffset & 255) >> 3) << 5);  // %256 /8 * 32 = &255 >>3 <<5
+#else
   map_base += (((voffset % 256) / 8) * 32);
+#endif
 
   second_ptr = map_ptr = map_base;
 
@@ -456,21 +617,45 @@ static void render_scanline_text_mosaic(u32 layer,
     if(hoffset >= 256) {
       // If we are rendering the right block, skip a whole charblock
       hoffset -= 256;
+#ifdef SF2000
+      map_ptr += 1024;  // 32*32 = 1024 (constant)
+#else
+#ifdef SF2000
+      map_ptr += 1024;  // 32*32 = 1024 (constant)
+#else
       map_ptr += (32 * 32);
+#endif
+#endif
     } else {
       // If we are rendering the left block, we might overrun into the right
+#ifdef SF2000
+      second_ptr += 1024;  // 32*32 = 1024 (constant)
+#else
+#ifdef SF2000
+      second_ptr += 1024;  // 32*32 = 1024 (constant)
+#else
       second_ptr += (32 * 32);
+#endif
+#endif
     }
   } else {
     hoffset %= 256;     // Background is 256 pixels wide
   }
 
   // Skip the left blocks within the block
+#ifdef SF2000
+  map_ptr += hoffset >> 3;  // /8 becomes >>3
+#else
   map_ptr += hoffset / 8;
+#endif
 
   // Render a single scanline of text tiles
   u32 tilewidth = is8bpp ? tile_width_8bpp : tile_width_4bpp;
+#ifdef SF2000
+  u32 vert_pix_offset = (voffset & 7) * tilewidth;  // %8 becomes &7
+#else
   u32 vert_pix_offset = (voffset % 8) * tilewidth;
+#endif
   // Calculate the pixel offset between a line and its "flipped" mirror.
   // The values can be {56, 40, 24, 8, -8, -24, -40, -56}
   s32 vflip_off = is8bpp ?
@@ -480,7 +665,15 @@ static void render_scanline_text_mosaic(u32 layer,
   // The tilemap base is selected via bgcnt (16KiB chunks)
   u32 tilecntrl = (bg_control >> 2) & 0x03;
   // Account for the base offset plus the tile vertical offset
+#ifdef SF2000
+  u8 *tile_base = &vram[(tilecntrl << 14) + vert_pix_offset];  // *16*1024 becomes <<14
+#else
+#ifdef SF2000
+  u8 *tile_base = &vram[(tilecntrl << 14) + vert_pix_offset];  // *16*1024 becomes <<14
+#else
   u8 *tile_base = &vram[tilecntrl * 16*1024 + vert_pix_offset];
+#endif
+#endif
 
   u16 bgcolor = paltbl[0];
 
@@ -490,7 +683,11 @@ static void render_scanline_text_mosaic(u32 layer,
     u16 tile = eswap16(*map_ptr);
 
     if (!(i % mosh)) {
-      const u8 *tile_ptr = &tile_base[(tile & 0x3FF) * (is8bpp ? 64 : 32)];
+    #ifdef SF2000
+  const u8 *tile_ptr = &tile_base[(tile & 0x3FF) << (is8bpp ? 6 : 5)];  // *64 = <<6, *32 = <<5
+#else
+  const u8 *tile_ptr = &tile_base[(tile & 0x3FF) * (is8bpp ? 64 : 32)];
+#endif
 
       bool hflip = (tile & 0x400);
       if (tile & 0x800)
@@ -583,11 +780,28 @@ static inline u8 lookup_pix_8bpp(
   // Pitch represents the log2(number of tiles per row) (from 16 to 128)
   u32 map_pitch = map_size + 4;
   // Given coords (px,py) in the background space, find the tile.
+#ifdef SF2000
+  // SF2000: Replace expensive division with bit shifts
+  u32 mapoff = (px >> 3) + ((py >> 3) << map_pitch);
+  // Each tile is 8x8, so 64 bytes each.
+#ifdef SF2000
+  const u8 *tile_ptr = &tile_base[map_base[mapoff] << 6];  // * tile_size_8bpp = *64 = <<6
+#else
+  const u8 *tile_ptr = &tile_base[map_base[mapoff] * tile_size_8bpp];
+#endif
+  // Read the 8bit color within the tile.
+  return tile_ptr[(px & 7) + ((py & 7) << 3)];
+#else
   u32 mapoff = (px / 8) + ((py / 8) << map_pitch);
   // Each tile is 8x8, so 64 bytes each.
+#ifdef SF2000
+  const u8 *tile_ptr = &tile_base[map_base[mapoff] << 6];  // * tile_size_8bpp = *64 = <<6
+#else
   const u8 *tile_ptr = &tile_base[map_base[mapoff] * tile_size_8bpp];
+#endif
   // Read the 8bit color within the tile.
   return tile_ptr[(px % 8) + ((py % 8) * 8)];
+#endif
 }
 
 
@@ -976,7 +1190,11 @@ static inline void render_obj_part_tile_Nbpp(
   u32 tile_offset, u16 palette, const u16 *pal
 ) {
   // Note that the last VRAM bank wrap around, hence the offset aliasing
+#ifdef SF2000
+  const u8* tile_ptr = &vram[65536 + (tile_offset & 0x7FFF)];  // 0x10000 = 65536
+#else
   const u8* tile_ptr = &vram[0x10000 + (tile_offset & 0x7FFF)];
+#endif
   u32 px_attr = px_comb | palette | 0x100;  // Combine flags + high palette bit
 
   if (is8bpp) {
@@ -1033,7 +1251,11 @@ template<typename dsttype, rendtype rdtype, bool is8bpp, bool hflip>
 static inline void render_obj_tile_Nbpp(u32 px_comb,
   dsttype *dest_ptr, u32 tile_offset, u16 palette, const u16 *pal
 ) {
+#ifdef SF2000
+  const u8* tile_ptr = &vram[65536 + (tile_offset & 0x7FFF)];  // 0x10000 = 65536
+#else
   const u8* tile_ptr = &vram[0x10000 + (tile_offset & 0x7FFF)];
+#endif
   u32 px_attr = px_comb | palette | 0x100;  // Combine flags + high palette bit
 
   if (is8bpp) {
@@ -1165,7 +1387,11 @@ static void render_object_mosaic(
     if (!(i % mosh)) {
       // Load tile pixel color.
       u32 tile_offset = base_tile_offset + (offx / 8) * tile_size_off;
-      const u8* tile_ptr = &vram[0x10000 + (tile_offset & 0x7FFF)];
+    #ifdef SF2000
+  const u8* tile_ptr = &vram[65536 + (tile_offset & 0x7FFF)];  // 0x10000 = 65536
+#else
+  const u8* tile_ptr = &vram[0x10000 + (tile_offset & 0x7FFF)];
+#endif
 
       // Lookup for each mode and flip value.
       if (is8bpp) {
@@ -1421,7 +1647,11 @@ void render_scanline_objs(
   u32 priority, u32 start, u32 end, void *raw_ptr, const u16* palptr
 ) {
   stype *scanline = (stype*)raw_ptr;
+#ifdef SF2000
+  s32 vcount = get_cached_vcount();
+#else
   s32 vcount = read_ioreg(REG_VCOUNT);
+#endif
   s32 objn;
   u32 objcnt = obj_priority_count[priority][vcount];
   u8 *objlist = obj_priority_list[priority][vcount];
@@ -1689,11 +1919,55 @@ typedef enum
 template <blendtype bldtype, bool st_objs>
 static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
   u32 bldalpha = read_ioreg(REG_BLDALPHA);
+#ifdef SF2000
+  // SF2000: Optimize MIN operations - 0x1F mask already limits to 0-31
+  u32 bldy_val = read_ioreg(REG_BLDY) & 0x1F;
+  u32 brightf = bldy_val > 16 ? 16 : bldy_val;
+  u32 blend_a_val = (bldalpha >> 0) & 0x1F;
+  u32 blend_b_val = (bldalpha >> 8) & 0x1F;
+  u32 blend_a = blend_a_val > 16 ? 16 : blend_a_val;
+  u32 blend_b = blend_b_val > 16 ? 16 : blend_b_val;
+#else
   u32 brightf = MIN(16, read_ioreg(REG_BLDY) & 0x1F);
   u32 blend_a = MIN(16, (bldalpha >> 0) & 0x1F);
   u32 blend_b = MIN(16, (bldalpha >> 8) & 0x1F);
+#endif
+
+// SF2000: Disable aggressive blend optimization that was causing blue glitches
+#ifdef SF2000_DISABLED_BLEND_OPTIMIZATION
+  // DISABLED: This UI area detection was causing blue glitches in Advance Wars
+  // Enhanced blend optimization - more aggressive but with safeguards
+  // Use global cached vcount to avoid excessive REG_VCOUNT reads
+  u32 current_vcount = get_cached_vcount();
+  bool in_ui_area = (current_vcount < 16 || current_vcount > 144); // Top/bottom UI areas
+  
+  if (!in_ui_area && blend_a <= 1 && blend_b <= 1 && bldtype == BLEND_ONLY) {
+    // Skip very light blending in gameplay areas - helps Wario Land 4 performance
+    memcpy(dst + start, src + start, (end - start) * sizeof(u16));
+    return;
+  }
+#endif
+  
+#ifdef SF2000_DISABLED_ZERO_BLEND_SKIP
+  if (blend_a == 0 && blend_b == 0) {
+    // DISABLED: Zero blend skipping causes animation glitches
+    memcpy(dst + start, src + start, (end - start) * sizeof(u16));
+    return;
+  }
+#endif
 
   bool can_saturate = blend_a + blend_b > 16;
+
+// SF2000: Disable blend palette cache - hurts performance
+#ifdef SF2000_DISABLED_BLEND_PALETTE_CACHE
+static u16 last_blend_palette_idx = 0xFFFF;
+static u16 last_blend_palette_val = 0;
+// DISABLED: Blend palette cache hurts performance
+#define PALETTE_LOOKUP(idx) (((idx) == last_blend_palette_idx) ? last_blend_palette_val : \
+  (last_blend_palette_idx = (idx), last_blend_palette_val = palette_ram_converted[(idx)]))
+#else
+#define PALETTE_LOOKUP(idx) (palette_ram_converted[idx])
+#endif
 
   if (can_saturate) {
     // If blending can result in saturation, we need to clamp output values.
@@ -1706,8 +1980,8 @@ static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
       bool do_blend    = (pixpair & 0x04000200) == 0x04000200;
       if ((st_objs && force_blend) || (do_blend && bldtype == BLEND_ONLY)) {
         // Top pixel is 1st target, pixel below is 2nd target. Blend!
-        u16 p1 = palette_ram_converted[(pixpair >>  0) & 0x1FF];
-        u16 p2 = palette_ram_converted[(pixpair >> 16) & 0x1FF];
+        u16 p1 = PALETTE_LOOKUP((pixpair >>  0) & 0x1FF);
+        u16 p2 = PALETTE_LOOKUP((pixpair >> 16) & 0x1FF);
         u32 p1e = (p1 | (p1 << 16)) & BLND_MSK;
         u32 p2e = (p2 | (p2 << 16)) & BLND_MSK;
         u32 pfe = (((p1e * blend_a) + (p2e * blend_b)) >> 4);
@@ -1727,7 +2001,7 @@ static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
       else if ((bldtype == BLEND_DARK || bldtype == BLEND_BRIGHT) &&
                (pixpair & 0x200) == 0x200) {
         // Top pixel is 1st-target, can still apply bright/dark effect.
-        u16 pidx = palette_ram_converted[pixpair & 0x1FF];
+        u16 pidx = PALETTE_LOOKUP(pixpair & 0x1FF);
         u32 epixel = (pidx | (pidx << 16)) & BLND_MSK;
         u32 pa = bldtype == BLEND_DARK ? 0 : ((BLND_MSK * brightf) >> 4) & BLND_MSK;
         u32 pb = ((epixel * (16 - brightf)) >> 4) & BLND_MSK;
@@ -1735,7 +2009,7 @@ static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
         dst[start++] = (epixel >> 16) | epixel;
       }
       else {
-        dst[start++] = palette_ram_converted[pixpair & 0x1FF];   // No effects
+        dst[start++] = PALETTE_LOOKUP(pixpair & 0x1FF);   // No effects
       }
     }
   } else {
@@ -1745,8 +2019,8 @@ static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
       bool force_blend = (pixpair & 0x04000800) == 0x04000800;
       if ((st_objs && force_blend) || (do_blend && bldtype == BLEND_ONLY)) {
         // Top pixel is 1st target, pixel below is 2nd target. Blend!
-        u16 p1 = palette_ram_converted[(pixpair >>  0) & 0x1FF];
-        u16 p2 = palette_ram_converted[(pixpair >> 16) & 0x1FF];
+        u16 p1 = PALETTE_LOOKUP((pixpair >>  0) & 0x1FF);
+        u16 p2 = PALETTE_LOOKUP((pixpair >> 16) & 0x1FF);
         u32 p1e = (p1 | (p1 << 16)) & BLND_MSK;
         u32 p2e = (p2 | (p2 << 16)) & BLND_MSK;
         u32 pfe = (((p1e * blend_a) + (p2e * blend_b)) >> 4) & BLND_MSK;
@@ -1755,7 +2029,7 @@ static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
       else if ((bldtype == BLEND_DARK || bldtype == BLEND_BRIGHT) &&
                (pixpair & 0x200) == 0x200) {
         // Top pixel is 1st-target, can still apply bright/dark effect.
-        u16 pidx = palette_ram_converted[pixpair & 0x1FF];
+        u16 pidx = PALETTE_LOOKUP(pixpair & 0x1FF);
         u32 epixel = (pidx | (pidx << 16)) & BLND_MSK;
         u32 pa = bldtype == BLEND_DARK ? 0 : ((BLND_MSK * brightf) >> 4) & BLND_MSK;
         u32 pb = ((epixel * (16 - brightf)) >> 4) & BLND_MSK;
@@ -1763,10 +2037,14 @@ static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
         dst[start++] = (epixel >> 16) | epixel;
       }
       else {
-        dst[start++] = palette_ram_converted[pixpair & 0x1FF];   // No effects
+        dst[start++] = PALETTE_LOOKUP(pixpair & 0x1FF);   // No effects
       }
     }
   }
+
+#ifdef SF2000
+#undef PALETTE_LOOKUP
+#endif
 }
 
 // Applies brighten/darken effect to a bunch of color-indexed pixels.
@@ -1774,9 +2052,33 @@ template <blendtype bldtype>
 static void merge_brightness(u32 start, u32 end, u16 *srcdst) {
   u32 brightness = MIN(16, read_ioreg(REG_BLDY) & 0x1F);
 
+// SF2000: Disable aggressive brightness optimization that was causing blue colors
+#ifdef SF2000_DISABLED
+  // DISABLED: This optimization was forcing black pixels incorrectly
+#endif
+
+  // Always apply brightness effects properly for other cases
+  if (brightness == 0) {
+    return; // No effect applied
+  }
+
+// SF2000: Disable brightness palette cache - hurts performance
+#ifdef SF2000_DISABLED_BRIGHTNESS_PALETTE_CACHE
+static u16 last_brightness_palette_idx = 0xFFFF;
+static u16 last_brightness_palette_val = 0;
+static u32 palette_frame_counter = 0;
+// DISABLED: Brightness palette cache hurts performance
+#define PALETTE_LOOKUP(idx) ((palette_frame_counter++ & 0x3FF) == 0 ? \
+  (last_brightness_palette_idx = 0xFFFF, palette_ram_converted[idx]) : \
+  (((idx) == last_brightness_palette_idx) ? last_brightness_palette_val : \
+  (last_brightness_palette_idx = (idx), last_brightness_palette_val = palette_ram_converted[(idx)])))
+#else
+#define PALETTE_LOOKUP(idx) (palette_ram_converted[idx])
+#endif
+
   while (start < end) {
     u16 spix = srcdst[start];
-    u16 pixcol = palette_ram_converted[spix & 0x1FF];
+    u16 pixcol = PALETTE_LOOKUP(spix & 0x1FF);
 
     if ((spix & 0x200) == 0x200) {
       // Pixel is 1st target, can apply color effect.
@@ -1789,6 +2091,10 @@ static void merge_brightness(u32 start, u32 end, u16 *srcdst) {
 
     srcdst[start++] = pixcol;
   }
+
+#ifdef SF2000
+#undef PALETTE_LOOKUP
+#endif
 }
 
 // Fills a segment using the backdrop color (in the right mode).
@@ -1812,7 +2118,12 @@ static void render_backdrop(u32 start, u32 end, u16 *scanline) {
   u32 bd_1st_target = ((bldcnt >> 0x5) & 0x01);
 
   if (bd_1st_target && effect == COL_EFFECT_BRIGHT) {
+#ifdef SF2000
+    u32 bldy_val = read_ioreg(REG_BLDY) & 0x1F;
+    u32 brightness = bldy_val > 16 ? 16 : bldy_val;
+#else
     u32 brightness = MIN(16, read_ioreg(REG_BLDY) & 0x1F);
+#endif
 
     // Unpack 16 bit pixel for fast blending operation
     u32 epixel = (pixcol | (pixcol << 16)) & BLND_MSK;
@@ -1822,7 +2133,12 @@ static void render_backdrop(u32 start, u32 end, u16 *scanline) {
     pixcol = (epixel >> 16) | epixel;
   }
   else if (bd_1st_target && effect == COL_EFFECT_DARK) {
+#ifdef SF2000
+    u32 bldy_val = read_ioreg(REG_BLDY) & 0x1F;
+    u32 brightness = bldy_val > 16 ? 16 : bldy_val;
+#else
     u32 brightness = MIN(16, read_ioreg(REG_BLDY) & 0x1F);
+#endif
     u32 epixel = (pixcol | (pixcol << 16)) & BLND_MSK;
     epixel = ((epixel * (16 - brightness)) >> 4) & BLND_MSK;  // Pixel color
     pixcol = (epixel >> 16) | epixel;
@@ -1845,7 +2161,11 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
   bool obj_enabled = (enabled_layers & 0x10);   // Objects are visible
 
   bool objlayer_is_1st_tgt = ((read_ioreg(REG_BLDCNT) >> 4) & 1) != 0;
+#ifdef SF2000
+  bool has_trans_obj = obj_alpha_count[get_cached_vcount()];
+#else
   bool has_trans_obj = obj_alpha_count[read_ioreg(REG_VCOUNT)];
+#endif
 
   for (lnum = 0; lnum < layer_count; lnum++) {
     u32 layer = layer_order[lnum];
@@ -1920,7 +2240,11 @@ static void render_w_effects(
   const layer_render_struct *renderers
 ) {
   bool effects_enabled = enable_flags & 0x20;   // Window bit for effects.
+#ifdef SF2000
+  bool obj_blend = obj_alpha_count[get_cached_vcount()] > 0;
+#else
   bool obj_blend = obj_alpha_count[read_ioreg(REG_VCOUNT)] > 0;
+#endif
   u16 bldcnt = read_ioreg(REG_BLDCNT);
 
   // If the window bits disable effects, default to NONE
@@ -2030,7 +2354,11 @@ static void bitmap_render_layers(
   u32 start, u32 end, dsttype *scanline, u32 enable_flags)
 {
   u16 dispcnt = read_ioreg(REG_DISPCNT);
+#ifdef SF2000
+  bool has_trans_obj = obj_alpha_count[get_cached_vcount()];
+#else
   bool has_trans_obj = obj_alpha_count[read_ioreg(REG_VCOUNT)];
+#endif
   bool objlayer_is_1st_tgt = (read_ioreg(REG_BLDCNT) & 0x10) != 0;
   bool bg2_is_1st_tgt = (read_ioreg(REG_BLDCNT) & 0x4) != 0;
 
@@ -2114,8 +2442,23 @@ static const layer_render_struct bitmap_mode_renderers = {
 static void render_scanline_conditional(
   u32 start, u32 end, u16 *scanline, u32 enable_flags)
 {
+#ifdef SF2000_DISABLED_DISPCNT_CACHE
+  // DISABLED: DISPCNT cache overhead on soft FPU MIPS
+  static u16 cached_dispcnt = 0xFFFF;
+  static u32 cached_scanline = 0xFFFFFFFF;
+  u32 current_vcount = get_cached_vcount();
+  
+  if (cached_scanline != current_vcount) {
+    cached_dispcnt = read_ioreg(REG_DISPCNT);
+    cached_scanline = current_vcount;
+  }
+  
+  u16 dispcnt = cached_dispcnt;
+  u32 video_mode = dispcnt & 0x07;
+#else
   u16 dispcnt = read_ioreg(REG_DISPCNT);
   u32 video_mode = dispcnt & 0x07;
+#endif
 
   // Check if any layer is actually active.
   if (layer_count && (enable_flags & 0x1F)) {
@@ -2184,7 +2527,31 @@ inline bool in_window_y(u32 vcount, u32 top, u32 bottom) {
 template<window_render_function outfn, unsigned winnum>
 static void render_window_n_pass(u16 *scanline, u32 start, u32 end)
 {
+#ifdef SF2000
+  u32 vcount = get_cached_vcount();
+#else
   u32 vcount = read_ioreg(REG_VCOUNT);
+#endif
+#ifdef SF2000
+  // Performance optimization: Cache window register reads - expensive on MIPS
+  static u32 cached_winxv[2] = {0xFFFFFFFF, 0xFFFFFFFF};
+  static u32 cached_winxh[2] = {0xFFFFFFFF, 0xFFFFFFFF};
+  static u32 cache_vcount = 0xFFFFFFFF;
+  
+  // Cache window registers per scanline instead of per function call
+  if (cache_vcount != vcount) {
+    cached_winxv[0] = read_ioreg(REG_WINxV(0));
+    cached_winxv[1] = read_ioreg(REG_WINxV(1));
+    cached_winxh[0] = read_ioreg(REG_WINxH(0));
+    cached_winxh[1] = read_ioreg(REG_WINxH(1));
+    cache_vcount = vcount;
+  }
+  
+  u32 win_top = cached_winxv[winnum] >> 8;
+  u32 win_bot = cached_winxv[winnum] & 0xFF;
+  u32 win_lraw = cached_winxh[winnum] >> 8;
+  u32 win_rraw = cached_winxh[winnum] & 0xFF;
+#else
   // Check the Y coordinates to check if they fall in the right row
   u32 win_top = read_ioreg(REG_WINxV(winnum)) >> 8;
   u32 win_bot = read_ioreg(REG_WINxV(winnum)) & 0xFF;
@@ -2192,9 +2559,17 @@ static void render_window_n_pass(u16 *scanline, u32 start, u32 end)
   // Clip the coordinates to the [start, end) range.
   u32 win_lraw = read_ioreg(REG_WINxH(winnum)) >> 8;
   u32 win_rraw = read_ioreg(REG_WINxH(winnum)) & 0xFF;
+#endif
+  // SF2000: Optimize MIN/MAX operations - use branchless logic
+#ifdef SF2000
+  u32 win_l = (win_lraw > start) ? ((win_lraw < end) ? win_lraw : end) : start;
+  u32 win_r = (win_rraw > start) ? ((win_rraw < end) ? win_rraw : end) : start;
+  bool goodwin = win_lraw < win_rraw;
+#else
   u32 win_l = MAX(start, MIN(end, win_lraw));
   u32 win_r = MAX(start, MIN(end, win_rraw));
   bool goodwin = win_lraw < win_rraw;
+#endif
 
   if (!in_window_y(vcount, win_top, win_bot) || (win_lraw == win_rraw))
     // WindowN is completely out, just render all out.
@@ -2287,7 +2662,14 @@ void update_scanline(void)
   u32 pitch = get_screen_pitch();
   u16 dispcnt = read_ioreg(REG_DISPCNT);
   u32 vcount = read_ioreg(REG_VCOUNT);
+#ifdef SF2000
+  // SF2000: Update global vcount cache to prevent excessive REG_VCOUNT reads
+  update_vcount_cache(vcount);
+  // SF2000: Optimize multiplication - pitch is always 240 for GBA
+  u16 *screen_offset = get_screen_pixels() + (vcount * 240);
+#else
   u16 *screen_offset = get_screen_pixels() + (vcount * pitch);
+#endif
   u32 video_mode = dispcnt & 0x07;
 
   if(skip_next_frame)
@@ -2305,29 +2687,56 @@ void update_scanline(void)
 
   // If the screen is in in forced blank draw pure white.
   if(dispcnt & 0x80)
-    memset(screen_offset, 0xff, 240*sizeof(u16));
+  {
+    u16 *dest = (u16 *)screen_offset;
+    for(u32 i = 0; i < 240; i++)
+      dest[i] = 0xFFFF;  // Pure white in RGB565
+  }
   else
     render_scanline_window(screen_offset);
 
   // Mode 0 does not use any affine params at all.
   if (video_mode) {
     // Account for vertical mosaic effect, by correcting affine references.
+#ifdef SF2000
+    const u32 mosaic_reg = read_ioreg(REG_MOSAIC);
+    const u32 bg2cnt = read_ioreg(REG_BG2CNT);
+    const u32 bg3cnt = read_ioreg(REG_BG3CNT);
+    const u32 bgmosv = ((mosaic_reg >> 4) & 0xF) + 1;
+    
+    if (bg2cnt & 0x40) {   // Mosaic enabled for this BG
+#else
     const u32 bgmosv = ((read_ioreg(REG_MOSAIC) >> 4) & 0xF) + 1;
 
     if (read_ioreg(REG_BG2CNT) & 0x40) {   // Mosaic enabled for this BG
+#endif
       if ((vcount % bgmosv) == bgmosv-1) { // Correct after the last line
+#ifdef SF2000
         affine_reference_x[0] += (s16)read_ioreg(REG_BG2PB) * bgmosv;
         affine_reference_y[0] += (s16)read_ioreg(REG_BG2PD) * bgmosv;
+#else
+        affine_reference_x[0] += (s16)read_ioreg(REG_BG2PB) * bgmosv;
+        affine_reference_y[0] += (s16)read_ioreg(REG_BG2PD) * bgmosv;
+#endif
       }
     } else {
       affine_reference_x[0] += (s16)read_ioreg(REG_BG2PB);
       affine_reference_y[0] += (s16)read_ioreg(REG_BG2PD);
     }
 
+#ifdef SF2000
+    if (bg3cnt & 0x40) {
+#else
     if (read_ioreg(REG_BG3CNT) & 0x40) {
+#endif
       if ((vcount % bgmosv) == bgmosv-1) {
+#ifdef SF2000
         affine_reference_x[1] += (s16)read_ioreg(REG_BG3PB) * bgmosv;
         affine_reference_y[1] += (s16)read_ioreg(REG_BG3PD) * bgmosv;
+#else
+        affine_reference_x[1] += (s16)read_ioreg(REG_BG3PB) * bgmosv;
+        affine_reference_y[1] += (s16)read_ioreg(REG_BG3PD) * bgmosv;
+#endif
       }
     } else {
       affine_reference_x[1] += (s16)read_ioreg(REG_BG3PB);

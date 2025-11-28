@@ -26,6 +26,8 @@ gbc_sound_struct gbc_sound_channel[4];
 const u32 sound_frequency = GBA_SOUND_FREQUENCY;
 
 u32 sound_on;
+
+#include "frequency_luts.h"
 static s16 sound_buffer[BUFFER_SIZE];
 static u32 sound_buffer_base;
 
@@ -61,9 +63,15 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
   u32 buffer_index = ds->buffer_index;
   s16 current_sample, next_sample;
 
+#ifdef SF2000
+  current_sample = ds->fifo[ds->fifo_base] << 4;  // *16 becomes <<4
+  ds->fifo_base = (ds->fifo_base + 1) & 31;       // %32 becomes &31
+  next_sample = ds->fifo[ds->fifo_base] << 4;     // *16 becomes <<4
+#else
   current_sample = ds->fifo[ds->fifo_base] * 16;
   ds->fifo_base = (ds->fifo_base + 1) % 32;
   next_sample = ds->fifo[ds->fifo_base] * 16;
+#endif
 
   if(sound_on == 1)
   {
@@ -93,9 +101,13 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
         /* render samples RIGHT */
         while(fifo_fractional <= 0xFFFFFF)
         {
+#ifdef SF2000
+           s16 dest_sample = current_sample + 
+              ((next_sample - current_sample) * (fifo_fractional >> 16)) >> 8;
+#else
            s16 dest_sample = current_sample +
               fp16_16_to_u32((next_sample - current_sample) * (fifo_fractional >> 8));
-
+#endif
            sound_buffer[buffer_index + 1]     += dest_sample;
 
            fifo_fractional += frequency_step;
@@ -107,9 +119,13 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
         /* render samples LEFT */
         while(fifo_fractional <= 0xFFFFFF)
         {
+#ifdef SF2000
+           s16 dest_sample = current_sample + 
+              ((next_sample - current_sample) * (fifo_fractional >> 16)) >> 8;
+#else
            s16 dest_sample = current_sample +
               fp16_16_to_u32((next_sample - current_sample) * (fifo_fractional >> 8));
-
+#endif
            sound_buffer[buffer_index]     += dest_sample;
 
            fifo_fractional += frequency_step;
@@ -121,9 +137,13 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
         /* render samples LEFT and RIGHT. */
         while(fifo_fractional <= 0xFFFFFF)
         {
+#ifdef SF2000
+           s16 dest_sample = current_sample + 
+              ((next_sample - current_sample) * (fifo_fractional >> 16)) >> 8;
+#else
            s16 dest_sample = current_sample +
               fp16_16_to_u32((next_sample - current_sample) * (fifo_fractional >> 8));
-
+#endif
            sound_buffer[buffer_index]     += dest_sample;
            sound_buffer[buffer_index + 1] += dest_sample;
            fifo_fractional += frequency_step;
@@ -414,6 +434,17 @@ void render_gbc_sound()
   if (!tick_delta)
     return;
 
+#ifdef SF2000
+  // SF2000: More conservative audio skip - only skip if sound is explicitly disabled
+  // AND no channels are active to prevent games like "The Millionaires" losing audio
+  u32 sound_enable = read_ioreg(REG_SOUNDCNT_X);
+  if ((sound_enable & 0x80) == 0 && (sound_enable & 0x0F) == 0) {
+    gbc_sound_last_cpu_ticks = cpu_ticks;
+    write_ioreg(REG_SOUNDCNT_X, sound_status);
+    return;
+  }
+#endif
+
   gbc_update_count++;
   gbc_sound_partial_ticks += fp16_16_fractional_part(buffer_ticks);
   buffer_ticks = fp16_16_to_u32(buffer_ticks);
@@ -430,19 +461,33 @@ void render_gbc_sound()
     gs = gbc_sound_channel + 0;
     if(gs->active_flag)
     {
-      sound_status |= 0x01;
-      sample_data = &square_pattern_duty[gs->sample_table_idx][0];
-      envelope_volume = gs->envelope_volume;
-      gbc_sound_render_channel(samples, 8, envelope, sweep);
+        sound_status |= 0x01;
+        sample_data = &square_pattern_duty[gs->sample_table_idx][0];
+        envelope_volume = gs->envelope_volume;
+#ifdef SF2000
+      // SF2000: Only skip rendering if envelope volume is actually 0 
+      if (gs->envelope_volume > 0) {
+#endif
+        gbc_sound_render_channel(samples, 8, envelope, sweep);
+#ifdef SF2000
+      }
+#endif
     }
 
     gs = gbc_sound_channel + 1;
     if(gs->active_flag)
     {
-      sound_status |= 0x02;
-      sample_data = &square_pattern_duty[gs->sample_table_idx][0];
-      envelope_volume = gs->envelope_volume;
-      gbc_sound_render_channel(samples, 8, envelope, nosweep);
+        sound_status |= 0x02;
+        sample_data = &square_pattern_duty[gs->sample_table_idx][0];
+        envelope_volume = gs->envelope_volume;
+#ifdef SF2000
+      // SF2000: Only skip rendering if envelope volume is actually 0
+      if (gs->envelope_volume > 0) {
+#endif
+        gbc_sound_render_channel(samples, 8, envelope, nosweep);
+#ifdef SF2000
+      }
+#endif
     }
 
     gs = gbc_sound_channel + 2;
@@ -464,35 +509,41 @@ void render_gbc_sound()
 
     if((gs->active_flag) && (gs->master_enable))
     {
-      sound_status |= 0x04;
-      sample_data = wave_samples;
-      if(gs->wave_type == 0)
-      {
-        if(gs->wave_bank == 1)
-          sample_data += 32;
+        sound_status |= 0x04;
+        sample_data = wave_samples;
+        if(gs->wave_type == 0)
+        {
+          if(gs->wave_bank == 1)
+            sample_data += 32;
 
-        gbc_sound_render_channel(samples, 32, noenvelope, nosweep);
-      }
-      else
-      {
-        gbc_sound_render_channel(samples, 64, noenvelope, nosweep);
-      }
+          gbc_sound_render_channel(samples, 32, noenvelope, nosweep);
+        }
+        else
+        {
+          gbc_sound_render_channel(samples, 64, noenvelope, nosweep);
+        }
     }
 
     gs = gbc_sound_channel + 3;
     if(gs->active_flag)
     {
-      sound_status |= 0x08;
-      envelope_volume = gs->envelope_volume;
-
-      if(gs->noise_type == 1)
-      {
-        gbc_sound_render_channel(noise, half, envelope, nosweep);
+        sound_status |= 0x08;
+        envelope_volume = gs->envelope_volume;
+#ifdef SF2000
+      // SF2000: Only skip rendering if envelope volume is actually 0
+      if (gs->envelope_volume > 0) {
+#endif
+        if(gs->noise_type == 1)
+        {
+          gbc_sound_render_channel(noise, half, envelope, nosweep);
+        }
+        else
+        {
+          gbc_sound_render_channel(noise, full, envelope, nosweep);
+        }
+#ifdef SF2000
       }
-      else
-      {
-        gbc_sound_render_channel(noise, full, envelope, nosweep);
-      }
+#endif
     }
   }
 

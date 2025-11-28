@@ -113,6 +113,55 @@ struct retro_core_option_definition option_defs_us[] = {
       "auto"
    },
    {
+      "gpsp_fake_rtc",
+      "Fake RTC for SF2000",
+      "Enable fake RTC system for devices without hardware clock. Uses minute-based counter with persistence and manual time control.",
+      {
+         { "enabled",  NULL },
+         { "disabled", NULL },
+         { NULL, NULL },
+      },
+      "enabled"
+   },
+   {
+      "gpsp_fake_rtc_persistent_bump_minutes",
+      "Persistent Time Bump (Minutes)",
+      "Time bump applied every boot. Enter number of minutes to add/subtract each time the core starts. Use negative values to subtract time.",
+      {
+         { "0", NULL },
+         { "30", "30 minutes" },
+         { "60", "1 hour" },
+         { "120", "2 hours" },
+         { "360", "6 hours" },
+         { "720", "12 hours" },
+         { "1440", "24 hours" },
+         { "-30", "-30 minutes" },
+         { "-60", "-1 hour" },
+         { "-120", "-2 hours" },
+         { NULL, NULL },
+      },
+      "0"
+   },
+   {
+      "gpsp_fake_rtc_one_off_bump_minutes",
+      "One-Off Time Bump (Minutes)",
+      "Time bump applied once only. After applying, this option automatically resets to 0. Use for one-time time adjustments.",
+      {
+         { "0", NULL },
+         { "30", "30 minutes" },
+         { "60", "1 hour" },
+         { "120", "2 hours" },
+         { "360", "6 hours" },
+         { "720", "12 hours" },
+         { "1440", "24 hours" },
+         { "-30", "-30 minutes" },
+         { "-60", "-1 hour" },
+         { "-120", "-2 hours" },
+         { NULL, NULL },
+      },
+      "0"
+   },
+   {
       "gpsp_serial",
       "Link Cable Connectivity",
       "Configures the serial (Link Cable) connection. Automatic will pick up a reasonable support for most known games.",
@@ -355,6 +404,19 @@ struct retro_core_option_definition option_defs_us[] = {
       },
       "4"
    },
+#ifdef SF2000
+   {
+      "gpsp_fast_forward_audio",
+      "Speed Control Audio",
+      "Enable audio during fast forward and slow motion modes. May cause audio glitches at non-normal speeds.",
+      {
+         { "disabled", "Disabled" },
+         { "enabled",  "Enabled" },
+         { NULL, NULL },
+      },
+      "disabled"
+   },
+#endif
    { NULL, NULL, NULL, {{0}}, NULL },
 };
 

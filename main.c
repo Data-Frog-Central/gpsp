@@ -19,6 +19,7 @@
 
 #include "common.h"
 #include <ctype.h>
+#include <time.h>
 
 timer_type timer[4];
 
@@ -33,6 +34,17 @@ u32 gbc_update_count = 0;
 u32 oam_update_count = 0;
 
 char main_path[512];
+char save_path[512];
+
+#ifdef SF2000
+// SF2000 Performance Level - global variable for runtime configuration
+u32 sf2000_performance_level = SF2000_OPTIMIZATION_LEVEL;
+#endif
+
+// Custom splash screen variables
+static bool splash_shown = false;
+static u32 splash_timer = 0;
+static bool first_rom_execution = false;
 
 static u32 random_state = 0;
 
@@ -47,10 +59,258 @@ void rand_seed(u32 data) {
   random_state ^= rand_gen() ^ data;
 }
 
+// Simple 8x8 bitmap font data (basic ASCII characters)
+static const u8 font_8x8[95][8] = {
+  {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // space
+  {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00}, // !
+  {0x36,0x36,0x00,0x00,0x00,0x00,0x00,0x00}, // "
+  {0x36,0x36,0x7F,0x36,0x7F,0x36,0x36,0x00}, // #
+  {0x0C,0x3E,0x03,0x1E,0x30,0x1F,0x0C,0x00}, // $
+  {0x00,0x63,0x33,0x18,0x0C,0x66,0x63,0x00}, // %
+  {0x1C,0x36,0x1C,0x6E,0x3B,0x33,0x6E,0x00}, // &
+  {0x06,0x06,0x03,0x00,0x00,0x00,0x00,0x00}, // '
+  {0x18,0x0C,0x06,0x06,0x06,0x0C,0x18,0x00}, // (
+  {0x06,0x0C,0x18,0x18,0x18,0x0C,0x06,0x00}, // )
+  {0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00}, // *
+  {0x00,0x0C,0x0C,0x3F,0x0C,0x0C,0x00,0x00}, // +
+  {0x00,0x00,0x00,0x00,0x00,0x0C,0x06,0x00}, // ,
+  {0x00,0x00,0x00,0x3F,0x00,0x00,0x00,0x00}, // -
+  {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x00}, // .
+  {0x60,0x30,0x18,0x0C,0x06,0x03,0x01,0x00}, // /
+  {0x3E,0x63,0x73,0x7B,0x6F,0x67,0x3E,0x00}, // 0
+  {0x0C,0x0E,0x0C,0x0C,0x0C,0x0C,0x3F,0x00}, // 1
+  {0x1E,0x33,0x30,0x1C,0x06,0x33,0x3F,0x00}, // 2
+  {0x1E,0x33,0x30,0x1C,0x30,0x33,0x1E,0x00}, // 3
+  {0x38,0x3C,0x36,0x33,0x7F,0x30,0x78,0x00}, // 4
+  {0x3F,0x03,0x1F,0x30,0x30,0x33,0x1E,0x00}, // 5
+  {0x1C,0x06,0x03,0x1F,0x33,0x33,0x1E,0x00}, // 6
+  {0x3F,0x33,0x30,0x18,0x0C,0x0C,0x0C,0x00}, // 7
+  {0x1E,0x33,0x33,0x1E,0x33,0x33,0x1E,0x00}, // 8
+  {0x1E,0x33,0x33,0x3E,0x30,0x18,0x0E,0x00}, // 9
+  {0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x00}, // :
+  {0x00,0x0C,0x0C,0x00,0x00,0x0C,0x06,0x00}, // ;
+  {0x18,0x0C,0x06,0x03,0x06,0x0C,0x18,0x00}, // <
+  {0x00,0x00,0x3F,0x00,0x00,0x3F,0x00,0x00}, // =
+  {0x06,0x0C,0x18,0x30,0x18,0x0C,0x06,0x00}, // >
+  {0x1E,0x33,0x30,0x18,0x0C,0x00,0x0C,0x00}, // ?
+  {0x3E,0x63,0x7B,0x7B,0x7B,0x03,0x1E,0x00}, // @
+  {0x0C,0x1E,0x33,0x33,0x3F,0x33,0x33,0x00}, // A
+  {0x3F,0x66,0x66,0x3E,0x66,0x66,0x3F,0x00}, // B
+  {0x3C,0x66,0x03,0x03,0x03,0x66,0x3C,0x00}, // C
+  {0x1F,0x36,0x66,0x66,0x66,0x36,0x1F,0x00}, // D
+  {0x7F,0x46,0x16,0x1E,0x16,0x46,0x7F,0x00}, // E
+  {0x7F,0x46,0x16,0x1E,0x16,0x06,0x0F,0x00}, // F
+  {0x3C,0x66,0x03,0x03,0x73,0x66,0x7C,0x00}, // G
+  {0x33,0x33,0x33,0x3F,0x33,0x33,0x33,0x00}, // H
+  {0x1E,0x0C,0x0C,0x0C,0x0C,0x0C,0x1E,0x00}, // I
+  {0x78,0x30,0x30,0x30,0x33,0x33,0x1E,0x00}, // J
+  {0x67,0x66,0x36,0x1E,0x36,0x66,0x67,0x00}, // K
+  {0x0F,0x06,0x06,0x06,0x46,0x66,0x7F,0x00}, // L
+  {0x63,0x77,0x7F,0x7F,0x6B,0x63,0x63,0x00}, // M
+  {0x63,0x67,0x6F,0x7B,0x73,0x63,0x63,0x00}, // N
+  {0x1C,0x36,0x63,0x63,0x63,0x36,0x1C,0x00}, // O
+  {0x3F,0x66,0x66,0x3E,0x06,0x06,0x0F,0x00}, // P
+  {0x1E,0x33,0x33,0x33,0x3B,0x1E,0x38,0x00}, // Q
+  {0x3F,0x66,0x66,0x3E,0x36,0x66,0x67,0x00}, // R
+  {0x1E,0x33,0x07,0x0E,0x38,0x33,0x1E,0x00}, // S
+  {0x3F,0x2D,0x0C,0x0C,0x0C,0x0C,0x1E,0x00}, // T
+  {0x33,0x33,0x33,0x33,0x33,0x33,0x3F,0x00}, // U
+  {0x33,0x33,0x33,0x33,0x33,0x1E,0x0C,0x00}, // V
+  {0x63,0x63,0x63,0x6B,0x7F,0x77,0x63,0x00}, // W
+  {0x63,0x63,0x36,0x1C,0x1C,0x36,0x63,0x00}, // X
+  {0x33,0x33,0x33,0x1E,0x0C,0x0C,0x1E,0x00}, // Y
+  {0x7F,0x63,0x31,0x18,0x4C,0x66,0x7F,0x00}, // Z
+  {0x1E,0x06,0x06,0x06,0x06,0x06,0x1E,0x00}, // [
+  {0x03,0x06,0x0C,0x18,0x30,0x60,0x40,0x00}, // backslash
+  {0x1E,0x18,0x18,0x18,0x18,0x18,0x1E,0x00}, // ]
+  {0x08,0x1C,0x36,0x63,0x00,0x00,0x00,0x00}, // ^
+  {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF}, // _
+  {0x0C,0x0C,0x18,0x00,0x00,0x00,0x00,0x00}, // `
+  {0x00,0x00,0x1E,0x30,0x3E,0x33,0x6E,0x00}, // a
+  {0x07,0x06,0x06,0x3E,0x66,0x66,0x3B,0x00}, // b
+  {0x00,0x00,0x1E,0x33,0x03,0x33,0x1E,0x00}, // c
+  {0x38,0x30,0x30,0x3e,0x33,0x33,0x6E,0x00}, // d
+  {0x00,0x00,0x1E,0x33,0x3f,0x03,0x1E,0x00}, // e
+  {0x1C,0x36,0x06,0x0f,0x06,0x06,0x0F,0x00}, // f
+  {0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x1F}, // g
+  {0x07,0x06,0x36,0x6E,0x66,0x66,0x67,0x00}, // h
+  {0x0C,0x00,0x0E,0x0C,0x0C,0x0C,0x1E,0x00}, // i
+  {0x30,0x00,0x30,0x30,0x30,0x33,0x33,0x1E}, // j
+  {0x07,0x06,0x66,0x36,0x1E,0x36,0x67,0x00}, // k
+  {0x0E,0x0C,0x0C,0x0C,0x0C,0x0C,0x1E,0x00}, // l
+  {0x00,0x00,0x33,0x7F,0x7F,0x6B,0x63,0x00}, // m
+  {0x00,0x00,0x1F,0x33,0x33,0x33,0x33,0x00}, // n
+  {0x00,0x00,0x1E,0x33,0x33,0x33,0x1E,0x00}, // o
+  {0x00,0x00,0x3B,0x66,0x66,0x3E,0x06,0x0F}, // p
+  {0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x78}, // q
+  {0x00,0x00,0x3B,0x6E,0x66,0x06,0x0F,0x00}, // r
+  {0x00,0x00,0x3E,0x03,0x1E,0x30,0x1F,0x00}, // s
+  {0x08,0x0C,0x3E,0x0C,0x0C,0x2C,0x18,0x00}, // t
+  {0x00,0x00,0x33,0x33,0x33,0x33,0x6E,0x00}, // u
+  {0x00,0x00,0x33,0x33,0x33,0x1E,0x0C,0x00}, // v
+  {0x00,0x00,0x63,0x6B,0x7F,0x7F,0x36,0x00}, // w
+  {0x00,0x00,0x63,0x36,0x1C,0x36,0x63,0x00}, // x
+  {0x00,0x00,0x33,0x33,0x33,0x3E,0x30,0x1F}, // y
+  {0x00,0x00,0x3F,0x19,0x0C,0x26,0x3F,0x00}, // z
+};
+
+// Simple function to draw text on the GBA screen buffer using bitmap font
+static void draw_splash_text(u16 *screen_buffer, const char *text, int x, int y, u16 color) {
+  int i, j, k;
+  int len = strlen(text);
+  
+  // First render normally to a temporary buffer
+  u16 temp_line[240]; // One line buffer
+  
+  for (j = 0; j < 8 && y + j < GBA_SCREEN_HEIGHT; j++) {
+    // Clear temp line for this row
+    memset(temp_line, 0, sizeof(temp_line));
+    
+    // Render all characters for this row
+    for (i = 0; i < len && x + i * 8 < GBA_SCREEN_WIDTH; i++) {
+      char c = text[i];
+      if (c < 32 || c > 126) continue; // Skip non-printable chars
+      
+      const u8 *glyph = font_8x8[c - 32]; // ASCII offset
+      u8 row = glyph[j];
+      
+      for (k = 0; k < 8 && x + i * 8 + k < GBA_SCREEN_WIDTH; k++) {
+        if (row & (0x80 >> k)) { // Normal bit reading
+          int px = x + i * 8 + k;
+          if (px >= 0 && px < GBA_SCREEN_WIDTH) {
+            temp_line[px] = color;
+          }
+        }
+      }
+    }
+    
+    // Now copy the line horizontally flipped to the real buffer
+    int py = y + j;
+    if (py >= 0 && py < GBA_SCREEN_HEIGHT) {
+      for (k = 0; k < GBA_SCREEN_WIDTH; k++) {
+        if (temp_line[k] == color) {  // Check if pixel was set to text color
+          screen_buffer[py * GBA_SCREEN_WIDTH + (GBA_SCREEN_WIDTH - 1 - k)] = temp_line[k];
+        }
+      }
+    }
+  }
+}
+
+// Display custom splash screen
+static void show_custom_splash() {
+  extern u16* gba_screen_pixels;
+  u16 bg_color = 0xF5BB;    // #FBB7DF background (RGB565: R31,G45,B27)
+  u16 text_color = 0xFFFF;  // White text
+  u16 accent_color = 0xFFFF; // White accent
+  u16 red_color = 0xFFFF;   // White for UNSTABLE BUILD
+  
+  // Clear screen to black
+  memset(gba_screen_pixels, 0, GBA_SCREEN_BUFFER_SIZE);
+  
+  // Fill with background color
+  int i;
+  for (i = 0; i < GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT; i++) {
+    gba_screen_pixels[i] = bg_color;
+  }
+  
+  // Draw black border
+  for (i = 0; i < GBA_SCREEN_WIDTH; i++) {
+    gba_screen_pixels[i] = 0x0000; // Top border
+    gba_screen_pixels[(GBA_SCREEN_HEIGHT - 1) * GBA_SCREEN_WIDTH + i] = 0x0000; // Bottom border
+  }
+  for (i = 0; i < GBA_SCREEN_HEIGHT; i++) {
+    gba_screen_pixels[i * GBA_SCREEN_WIDTH] = 0x0000; // Left border
+    gba_screen_pixels[i * GBA_SCREEN_WIDTH + (GBA_SCREEN_WIDTH - 1)] = 0x0000; // Right border
+  }
+  
+  // Generate dynamic version string - use build date in DDMMYYYY format
+  char version_str[32];
+  char version_reversed[32];
+  
+  time_t now = time(NULL);
+  if (now > 0 && now != (time_t)-1) {
+    // System time is available
+    struct tm *local_time = localtime(&now);
+    if (local_time && local_time->tm_year > 70) {
+      // Valid time (after 1970) - format as DDMMYYYY
+      snprintf(version_str, sizeof(version_str), "Ver %02d%02d%04d",
+               local_time->tm_mday,        // Day (01-31)
+               local_time->tm_mon + 1,     // Month (01-12)
+               local_time->tm_year + 1900); // Full year
+    } else {
+      // Use build date as fallback
+      const char* build_date = __DATE__;  // "Jun 23 2025"
+      
+      int month = 0, day = 0, year = 0;
+      char month_str[4];
+      sscanf(build_date, "%3s %d %d", month_str, &day, &year);
+      
+      // Convert month string to number
+      const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+      for (int i = 0; i < 12; i++) {
+        if (strncmp(month_str, months[i], 3) == 0) {
+          month = i + 1;
+          break;
+        }
+      }
+      
+      snprintf(version_str, sizeof(version_str), "Ver %02d%02d%04d",
+               day, month, year);
+    }
+  } else {
+    // System time not available, use build date
+    const char* build_date = __DATE__;  // "Jun 23 2025"
+    
+    int month = 0, day = 0, year = 0;
+    char month_str[4];
+    sscanf(build_date, "%3s %d %d", month_str, &day, &year);
+    
+    // Convert month string to number
+    const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    for (int i = 0; i < 12; i++) {
+      if (strncmp(month_str, months[i], 3) == 0) {
+        month = i + 1;
+        break;
+      }
+    }
+    
+    snprintf(version_str, sizeof(version_str), "Ver %02d%02d%04d",
+             day, month, year);
+  }
+  
+  // Reverse the string for mirrored display
+  int len = strlen(version_str);
+  for (i = 0; i < len; i++) {
+    version_reversed[i] = version_str[len - 1 - i];
+  }
+  version_reversed[len] = '\0';
+  
+  // Draw splash text - using reversed strings for mirrored display
+  draw_splash_text(gba_screen_pixels, "V HSAD PSPG", 90, 40, text_color);
+  draw_splash_text(gba_screen_pixels, "YTSORP YB DOM", 80, 60, accent_color);
+  draw_splash_text(gba_screen_pixels, "Ksx5vHkKfvb/gg.drocsid", 20, 100, text_color);
+  draw_splash_text(gba_screen_pixels, version_reversed, 80, 120, text_color);
+  
+  // Clean design without diagonal lines
+}
 
 static unsigned update_timers(irq_type *irq_raised, unsigned completed_cycles)
 {
    unsigned i, ret = 0;
+#ifdef SF2000
+   static u32 timer_update_batch_counter = 0;
+   bool do_register_write = true;
+
+   // SF2000: Batch timer register writes to reduce overhead
+   if (SF2000_ENABLE_TIMER_BATCHING) {
+      timer_update_batch_counter++;
+      // Only write timer registers every 4th update (still update internal counts every time)
+      do_register_write = (timer_update_batch_counter & 0x3) == 0;
+   }
+#endif
+
    for (i = 0; i < 4; i++)
    {
       if(timer[i].status == TIMER_INACTIVE)
@@ -60,6 +320,9 @@ static unsigned update_timers(irq_type *irq_raised, unsigned completed_cycles)
       {
          timer[i].count -= completed_cycles;
          /* io_registers accessors range: REG_TM0D, REG_TM1D, REG_TM2D, REG_TM3D */
+#ifdef SF2000
+         if (do_register_write)
+#endif
          write_ioreg(REG_TMXD(i), -(timer[i].count >> timer[i].prescale));
       }
 
@@ -73,6 +336,9 @@ static unsigned update_timers(irq_type *irq_raised, unsigned completed_cycles)
       if((i != 3) && (timer[i + 1].status == TIMER_CASCADE))
       {
          timer[i + 1].count--;
+#ifdef SF2000
+         if (do_register_write)
+#endif
          write_ioreg(REG_TMXD(i + 1), -timer[i+1].count);
       }
 
@@ -110,6 +376,11 @@ void init_main(void)
   cpu_ticks = 0;
   execute_cycles = 960;
   video_count = 960;
+  
+  // Initialize splash screen state
+  splash_shown = false;
+  splash_timer = 0;
+  first_rom_execution = false;
 
 #ifdef HAVE_DYNAREC
   init_dynarec_caches();
@@ -127,6 +398,31 @@ u32 function_cc update_gba(int remaining_cycles)
 
   remaining_cycles = MAX(remaining_cycles, -64);
 
+  // Check if we should show splash screen
+  if (!splash_shown && reg[REG_PC] >= 0x08000000 && reg[REG_PC] < 0x0E000000) {
+    // First time executing ROM code
+    if (!first_rom_execution) {
+      first_rom_execution = true;
+      splash_timer = 0;
+    }
+    
+    // Show splash for about 6 seconds (360 frames at 60fps)
+    if (splash_timer < 360) {
+      show_custom_splash();
+      splash_timer++;
+      
+      // Force a frame completion to display the splash
+      frame_complete = 0x80000000;
+      frame_counter++;
+      return execute_cycles | changed_pc | frame_complete;
+    } else if (!splash_shown) {
+      splash_shown = true;
+      // Clear the screen after splash
+      extern u16* gba_screen_pixels;
+      memset(gba_screen_pixels, 0, GBA_SCREEN_BUFFER_SIZE);
+    }
+  }
+
   do
   {
     unsigned i;
@@ -134,6 +430,7 @@ u32 function_cc update_gba(int remaining_cycles)
     // (remaining_cycles can be negative and should be close to zero)
     unsigned completed_cycles = execute_cycles - remaining_cycles;
     cpu_ticks += completed_cycles;
+
 
     remaining_cycles = 0;
 
@@ -235,6 +532,7 @@ u32 function_cc update_gba(int remaining_cycles)
           // We completed a frame, tell the dynarec to exit to the main thread
           frame_complete = 0x80000000;
           frame_counter++;
+          
         }
 
         // Vcount trigger (flag) and IRQ if enabled
@@ -263,6 +561,38 @@ u32 function_cc update_gba(int remaining_cycles)
     // Figure out when we need to stop CPU execution. The next event is
     // a video event or a timer event, whatever happens first.
     execute_cycles = MAX(video_count, 0);
+    
+#if defined(SF2000) || defined(MIPS_SOFT_FPU) || defined(__mips__)
+    // Enhanced SF2000/MIPS cycle batching with configurable performance levels
+    // More aggressive batching reduces dynarec overhead significantly
+    if (SF2000_ENABLE_CYCLE_BATCHING && execute_cycles > 200) {
+      u32 batch_min, batch_max, batch_multiplier;
+      
+      // Configure batching parameters based on performance level
+      switch (sf2000_performance_level) {
+        case SF2000_OPTIMIZATION_AGGRESSIVE:
+          batch_min = 100;
+          batch_max = 12000; // MASSIVE batches for maximum performance
+          batch_multiplier = 5;  // 5x the cycles!
+          break;
+        case SF2000_OPTIMIZATION_MODERATE:
+          batch_min = 150;
+          batch_max = 10000; // Very large batches
+          batch_multiplier = 4;  // 4x the cycles
+          break;
+        case SF2000_OPTIMIZATION_SAFE:
+        default:
+          batch_min = 200;
+          batch_max = 8000;  // Larger safe batches
+          batch_multiplier = 3;  // Triple the cycles
+          break;
+      }
+      
+      if (execute_cycles > batch_min && execute_cycles < 4000) {
+        execute_cycles = MIN(execute_cycles * batch_multiplier, batch_max);
+      }
+    }
+#endif
     {
       u32 cc = serial_next_event();
       execute_cycles = MIN(execute_cycles, cc);
@@ -421,5 +751,3 @@ unsigned main_write_savestate(u8* dst)
 
   return (unsigned int)(dst - startp);
 }
-
-

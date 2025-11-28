@@ -3,7 +3,7 @@
 #define GPSP_CONFIG_H
 
 #define GPSP_NAME                "gpSP"
-#define GPSP_VERSION             "v1.0.0"
+#define GPSP_VERSION             "v1.0.0-fake-rtc"
 #define GPSP_NETPACKET_VERSION   "gpSP v1.0"
 
 /* Default ROM buffer size in megabytes (this is a maximum value!) */
@@ -17,11 +17,11 @@
   #define RAM_TRANSLATION_CACHE_SIZE (1024 * 384)
 #else
   #ifdef SF2000
-    #define ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 9)
+    #define ROM_TRANSLATION_CACHE_SIZE (1024 * 4608)
   #else
     #define ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 10)
   #endif
-  #define RAM_TRANSLATION_CACHE_SIZE (1024 * 512)
+  #define RAM_TRANSLATION_CACHE_SIZE (1024 * 256)
 #endif
 
 /* Should be an upperbound to the maximum number of bytes a single JIT'ed
