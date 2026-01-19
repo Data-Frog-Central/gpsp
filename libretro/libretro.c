@@ -1094,22 +1094,13 @@ bool retro_load_game(const struct retro_game_info* info)
       strcpy(filename_bios, main_path);
 
    bool bios_loaded = false;
-   if (selected_bios == auto_detect || selected_bios == official_bios)
-   {
+   if (selected_bios == auto_detect || selected_bios == official_bios) {
      bios_loaded = true;
      strcat(filename_bios, "/gba_bios.bin");
 
-     if (load_bios(filename_bios) != 0)
-     {
+     if (load_bios(filename_bios) != 0) {
         if (selected_bios == official_bios)
           show_warning_message("Could not load BIOS image file, using built-in BIOS", 2500);
-        bios_loaded = false;
-     }
-
-     if (bios_loaded && bios_rom[0] != 0x18)
-     {
-        if (selected_bios == official_bios)
-          show_warning_message("BIOS image seems incorrect, using built-in BIOS", 2500);
         bios_loaded = false;
      }
    }
